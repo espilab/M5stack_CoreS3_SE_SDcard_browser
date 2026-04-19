@@ -1,0 +1,24 @@
+# ESP-IDF ビルド成果物
+build/
+sdkconfig
+sdkconfig.old
+
+# ESP-IDF が自動生成するコンポーネント
+managed_components/
+dependencies.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# VSCode
+.vscode/
+.devcontainer/
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# macOS
+.DS_Store

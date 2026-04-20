@@ -21,6 +21,7 @@ M5Stack に書き込んだファームウェアが USB 経由で
 
 SD カードは M5Stack に挿したまま、PC 側から自由に読み書きできます。
 
+![screen image](image/screenshot.png)
 ---
 
 ## Web ブラウザ機能（http://192.168.7.1/）

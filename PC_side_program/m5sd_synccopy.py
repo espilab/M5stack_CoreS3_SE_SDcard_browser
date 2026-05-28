@@ -17,6 +17,10 @@
 #    2. ESP32側のフォルダが無ければ作成する
 #    3. PC側フォルダ内のファイルを1つずつアップロードする
 #    4. ESCキーで中断確認プロンプトを表示する
+#
+# 2026.5.15  ESP32側サブディレクトリの探索の重複をなくして高速化した
+# 2026.5.21  転送するファイルサイズ上限を設定する機能を追加
+# 2026.5.29  転送するファイルサイズ下限を設定する機能を追加 -> -y <size> オプション
 
 import requests
 import json
@@ -25,6 +29,8 @@ import os
 import time
 import uuid
 import threading
+
+version = '1.0.1'  # 2026.5.29
 
 # Windowsのコマンドライン文字化け対策
 if sys.platform == 'win32':
@@ -224,17 +230,48 @@ def api_upload(local_path, remote_dir, mtime_local):
 # -----------------------------------------------------------------------
 def main():
     global _abort_flag
-
+    global version
+    
     if len(sys.argv) < 3:
         print('Usage:')
-        print('  python m5sd_synccopy.py <PC側パス名> <ESP32側フォルダ名>')
+        print('  python m5sd_synccopy.py <PC側パス名> <ESP32側フォルダ名> [-d] [-x <MiB>] [-y <MiB>]')
+        print()
+        print('  -d       : ESP32側にあってPC側にないファイル・ディレクトリを削除（同期モード）')
+        print('  -x <MiB> : 指定MiB を超えるファイルはスキップ（上限フィルタ）')
+        print('  -y <MiB> : 指定MiB 以下のファイルはスキップ（下限フィルタ）')
+        print('  -x と -y を同時指定すると範囲指定になります')
+        print('  例: -y 10 -x 100 → 10MiB超～100MiB以下のみ転送')
         print()
         print('Example:')
         print('  python m5sd_synccopy.py C:\\data\\logs /logs')
+        print('  python m5sd_synccopy.py C:\\data\\logs /logs -d')
+        print('  python m5sd_synccopy.py C:\\data\\logs /logs -x 100')
+        print('  python m5sd_synccopy.py C:\\data\\logs /logs -y 10 -x 100')
+        print('')
+        print('version ', version)
         sys.exit(1)
 
-    local_dir  = sys.argv[1]
-    remote_dir = sys.argv[2]
+    local_dir   = sys.argv[1]
+    remote_dir  = sys.argv[2]
+    delete_mode = len(sys.argv) >= 4 and sys.argv[3] == '-d'
+
+    # -x / -y オプションの解析
+    max_size = None  # None = 上限なし（-x）
+    min_size = None  # None = 下限なし（-y）
+    args = sys.argv[3:]
+    for i, a in enumerate(args):
+        if a == '-x' and i + 1 < len(args):
+            try:
+                max_size = int(args[i + 1]) * 1024 * 1024  # MiB → bytes
+            except ValueError:
+                print(f"Error: -x の引数が不正です: {args[i + 1]}")
+                sys.exit(1)
+        if a == '-y' and i + 1 < len(args):
+            try:
+                min_size = int(args[i + 1]) * 1024 * 1024  # MiB → bytes
+            except ValueError:
+                print(f"Error: -y の引数が不正です: {args[i + 1]}")
+                sys.exit(1)
 
     # ESP32側パスの先頭は / で始まること
     if not remote_dir.startswith('/'):
@@ -264,6 +301,14 @@ def main():
 
     print(f'コピー元: {local_dir}  ({len(all_files)} ファイル、サブディレクトリ含む)')
     print(f'コピー先: ESP32:{remote_dir}')
+    if delete_mode:
+        print(f'削除モード: ESP32側の余分なファイル・ディレクトリを削除します')
+    if max_size is not None and min_size is not None:
+        print(f'サイズ制限: {min_size // (1024*1024)} MiB 超 ～ {max_size // (1024*1024)} MiB 以下のみ転送')
+    elif max_size is not None:
+        print(f'サイズ制限(上限): {max_size // (1024*1024)} MiB を超えるファイルはスキップ')
+    elif min_size is not None:
+        print(f'サイズ制限(下限): {min_size // (1024*1024)} MiB 以下のファイルはスキップ')
     print(f'ESCキーで中断できます')
     print()
 
@@ -271,18 +316,23 @@ def main():
     watcher = threading.Thread(target=_key_watcher, daemon=True)
     watcher.start()
 
+    confirmed_dirs = set()  # 存在確認済みのESP32側ディレクトリをキャッシュ
+
     def ensure_remote_dir(path):
-        """ESP32側にディレクトリが無ければ、親ディレクトリも含めて再帰的に作成する"""
-        # パスを分解して親から順に確認・作成
+        """ESP32側にディレクトリが無ければ、親ディレクトリも含めて再帰的に作成する。
+        確認済みのディレクトリはキャッシュして重複チェックをスキップする。"""
         parts = [p for p in path.split('/') if p]  # 空要素を除去
         for i in range(1, len(parts) + 1):
             cur = '/' + '/'.join(parts[:i])
+            if cur in confirmed_dirs:
+                continue  # 確認済みはスキップ
             try:
                 api_list_dir(cur)
                 print(f'  [DIR] 既存: {cur}')
             except Exception:
                 print(f'  [DIR] 作成: {cur}')
                 api_mkdir(cur)
+            confirmed_dirs.add(cur)  # 確認・作成済みとして記録
 
     def local_to_remote(local_path):
         """ローカルパスをESP32側のパスに変換する"""
@@ -366,6 +416,18 @@ def main():
                 # 表示用ローカル時刻文字列（time.localtime(mtime) で正しい表示になる）
                 local_dt = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(mtime))
 
+                # サイズフィルタチェック
+                if max_size is not None and filesize > max_size:
+                    print(f'[{file_no}/{total}] SKIP(大) {cur_remote}/{filename}'
+                          f'  ({filesize:,} B > {max_size // (1024*1024)} MiB)')
+                    skip_cnt += 1
+                    continue
+                if min_size is not None and filesize <= min_size:
+                    print(f'[{file_no}/{total}] SKIP(小) {cur_remote}/{filename}'
+                          f'  ({filesize:,} B <= {min_size // (1024*1024)} MiB)')
+                    skip_cnt += 1
+                    continue
+
                 # ESP32側に同名ファイルがある場合はタイムスタンプを比較
                 # remote_mtimeはtime.mktime()でローカル時刻→unix変換済みなので
                 # mtimeと直接比較できる（どちらもUTC基準）
@@ -394,9 +456,102 @@ def main():
                     ng_cnt += 1
                 print()
 
-        # 4. 結果サマリ
+        # 4. 削除モード: ESP32側の余分なファイル・ディレクトリを削除
+        del_cnt = 0
+        if delete_mode and not _abort_flag:
+            print()
+            print('--- 削除フェーズ ---')
+
+            # PC側の相対パスセットを作成
+            local_rel_files = set()
+            local_rel_dirs  = set()
+            for dirpath, dirnames, filenames in os.walk(local_dir):
+                rel = os.path.relpath(dirpath, local_dir).replace('\\', '/')
+                if rel != '.':
+                    local_rel_dirs.add(rel)
+                for fn in filenames:
+                    frel = (rel + '/' + fn) if rel != '.' else fn
+                    local_rel_files.add(frel)
+
+            # ESP32側を再帰的に走査して余分なエントリを収集
+            extra_files = []
+            extra_dirs  = []
+
+            def collect_extra(remote_path, rel_prefix):
+                try:
+                    data = api_list_dir(remote_path)
+                except Exception:
+                    return
+                for entry in data.get('files', []):
+                    name     = entry['name']
+                    rel_path = (rel_prefix + '/' + name) if rel_prefix else name
+                    full     = remote_path.rstrip('/') + '/' + name
+                    if entry.get('dir'):
+                        collect_extra(full, rel_path)
+                        if rel_path not in local_rel_dirs:
+                            extra_dirs.append(full)
+                    else:
+                        if rel_path not in local_rel_files:
+                            extra_files.append(full)
+
+            collect_extra(remote_dir, '')
+
+            if not extra_files and not extra_dirs:
+                print('削除対象なし')
+            else:
+                for path in extra_files:
+                    if check_esc():
+                        print('中断しました。')
+                        break
+                    print(f'  [DEL] {path}')
+                    try:
+                        r = requests.post(
+                            f'{BASE}/api/delete',
+                            headers={'Content-Type': 'application/json; charset=utf-8',
+                                     'Connection': 'close'},
+                            data=json.dumps({'paths': [path]},
+                                            ensure_ascii=False).encode('utf-8'),
+                            timeout=10
+                        )
+                        result = r.json()
+                        if result.get('deleted', 0) > 0:
+                            print(f'        -> 削除OK')
+                            del_cnt += 1
+                        else:
+                            print(f'        -> 失敗')
+                    except Exception as e:
+                        print(f'        -> エラー: {e}')
+
+                for path in extra_dirs:
+                    if check_esc():
+                        print('中断しました。')
+                        break
+                    print(f'  [RMDIR] {path}')
+                    try:
+                        r = requests.post(
+                            f'{BASE}/api/delete',
+                            headers={'Content-Type': 'application/json; charset=utf-8',
+                                     'Connection': 'close'},
+                            data=json.dumps({'paths': [path]},
+                                            ensure_ascii=False).encode('utf-8'),
+                            timeout=10
+                        )
+                        result = r.json()
+                        if result.get('deleted', 0) > 0:
+                            print(f'        -> 削除OK')
+                            del_cnt += 1
+                        else:
+                            print(f'        -> 失敗')
+                    except Exception as e:
+                        print(f'        -> エラー: {e}')
+
+        # 5. 結果サマリ
         print('=' * 40)
-        print(f'完了: {ok_cnt} 件コピー / {skip_cnt} 件スキップ / {ng_cnt} 件失敗 / {total} 件中')
+        if delete_mode:
+            print(f'完了: {ok_cnt} 件コピー / {skip_cnt} 件スキップ / {ng_cnt} 件失敗 / {total} 件中')
+            print(f'削除: {del_cnt} 件削除')
+        else:
+            print(f'完了: {ok_cnt} 件コピー / {skip_cnt} 件スキップ / {ng_cnt} 件失敗 / {total} 件中')
 
     except KeyboardInterrupt:
         print('\nCtrl+C で中断しました。')

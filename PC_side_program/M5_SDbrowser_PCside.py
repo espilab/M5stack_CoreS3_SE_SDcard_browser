@@ -4,6 +4,7 @@
 #  M5Stack Core3 SE のSDカード内のファイルをPC側から操作するツール
 #
 #  2026-4-7 upload/download時に進捗表示を付けた。
+#  2026-5-29 ファイル/ディレクトリ名に'+'が含まれる場合のアップロード失敗対策を追加
 #
 #  Usage:
 #    python M5_SDbrowser_PCside01.py l [path]           ファイル一覧
@@ -16,6 +17,14 @@ import sys
 import os
 import time
 import uuid
+
+version = '1.0.2'   # 2026.5.29   "+"対策を追加
+
+# ESP-IDF の httpd は POST ボディも URL デコードするため、
+# JSON ボディに含めるパス文字列中の '+' を '%2B' に変換する必要がある。
+def penc(path):
+    """JSONボディ用パスエンコード: + → %2B（ESP-IDFのURLデコード対策）"""
+    return path.replace('+', '%2B')
 # Windowsのコマンドライン文字化け対策
 if sys.platform == 'win32':
     sys.stdin.reconfigure(encoding='utf-8')
@@ -246,7 +255,7 @@ def make_dir(remote_path):
     r = requests.post(
         f'{BASE}/api/mkdir',
         headers={'Content-Type': 'application/json; charset=utf-8'},
-        data=json.dumps({'path': remote_path}, ensure_ascii=False).encode('utf-8')
+        data=json.dumps({'path': penc(remote_path)}, ensure_ascii=False).encode('utf-8')
     )
 
     if r.status_code != 200:
@@ -283,7 +292,7 @@ def rename_file(remote_path, new_name):
     r = requests.post(
         f'{BASE}/api/rename',
         headers={'Content-Type': 'application/json; charset=utf-8'},
-        data=json.dumps({'from': remote_path, 'to': new_path},
+        data=json.dumps({'from': penc(remote_path), 'to': penc(new_path)},
                         ensure_ascii=False).encode('utf-8')
     )
 
@@ -410,7 +419,7 @@ def remove_dir_recursive(remote_path):
             r = requests.post(
                 f'{BASE}/api/delete',
                 headers={'Content-Type': 'application/json; charset=utf-8'},
-                data=json.dumps({'paths': chunk}, ensure_ascii=False).encode('utf-8')
+                data=json.dumps({'paths': [penc(p) for p in chunk]}, ensure_ascii=False).encode('utf-8')
             )
             if r.status_code == 200:
                 result = r.json()
@@ -436,12 +445,12 @@ def remove_dir_recursive(remote_path):
                     requests.post(
                         f'{BASE}/api/delete',
                         headers={'Content-Type': 'application/json; charset=utf-8'},
-                        data=json.dumps({'paths': extra_paths}, ensure_ascii=False).encode('utf-8')
+                        data=json.dumps({'paths': [penc(p) for p in extra_paths]}, ensure_ascii=False).encode('utf-8')
                     )
             r = requests.post(
                 f'{BASE}/api/delete',
                 headers={'Content-Type': 'application/json; charset=utf-8'},
-                data=json.dumps({'paths': [d]}, ensure_ascii=False).encode('utf-8')
+                data=json.dumps({'paths': [penc(d)]}, ensure_ascii=False).encode('utf-8')
             )
             if r.status_code == 200 and r.json().get('deleted', 0) > 0:
                 print(f"  削除: {d}")
@@ -453,7 +462,7 @@ def remove_dir_recursive(remote_path):
     r = requests.post(
         f'{BASE}/api/delete',
         headers={'Content-Type': 'application/json; charset=utf-8'},
-        data=json.dumps({'paths': [remote_path]}, ensure_ascii=False).encode('utf-8')
+        data=json.dumps({'paths': [penc(remote_path)]}, ensure_ascii=False).encode('utf-8')
     )
     if r.status_code == 200 and r.json().get('deleted', 0) > 0:
         print(f"削除完了: {remote_path}")
@@ -463,6 +472,7 @@ def remove_dir_recursive(remote_path):
 
 
 def help():
+    global version
     print("Usage:")
     print("  python M5_SDbrowser_PCside01.py l [path]           : ファイル一覧")
     print("  python M5_SDbrowser_PCside01.py u <file> [path]    : アップロード")
@@ -484,6 +494,8 @@ def help():
     print("  python M5_SDbrowser_PCside01.py r /a.txt,/b.txt,/empty_dir")
     print("  python M5_SDbrowser_PCside01.py k /new_folder")
     print("  python M5_SDbrowser_PCside01.py k /subdir/新しいフォルダ")
+    print()
+    print('version ',version)
 
 
 if __name__ == '__main__':

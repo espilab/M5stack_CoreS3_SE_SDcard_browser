@@ -37,7 +37,7 @@ def penc(path):
     """JSONボディ用パスエンコード: + → %2B（ESP-IDFのURLデコード対策）"""
     return path.replace('+', '%2B')
 
-version = '1.0.1'  # 2026.5.29
+version = '1.0.2'  # 2026.5.29
 
 # Windowsのコマンドライン文字化け対策
 if sys.platform == 'win32':

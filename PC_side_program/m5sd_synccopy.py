@@ -29,6 +29,13 @@ import os
 import time
 import uuid
 import threading
+from urllib.parse import quote as urlquote
+
+# ESP-IDF の httpd は POST ボディも URL デコードするため、
+# JSON ボディに含めるパス文字列中の '+' を '%2B' に変換する必要がある。
+def penc(path):
+    """JSONボディ用パスエンコード: + → %2B（ESP-IDFのURLデコード対策）"""
+    return path.replace('+', '%2B')
 
 version = '1.0.1'  # 2026.5.29
 
@@ -170,7 +177,10 @@ def api_set_clock():
 
 def api_list_dir(path):
     """ESP32側のディレクトリ一覧を取得する。存在しない場合はRuntimeErrorを投げる"""
-    r = requests.get(f'{BASE}/api/dir', params={'path': path}, headers={'Connection':'close'}, timeout=10)
+    r = requests.get(
+        f'{BASE}/api/dir?path={urlquote(path, safe="")}',
+        headers={'Connection': 'close'}, timeout=10
+    )
     r.raise_for_status()
     data = r.json()
     if 'error' in data:
@@ -183,7 +193,7 @@ def api_mkdir(path):
     r = requests.post(
         f'{BASE}/api/mkdir',
         headers={'Content-Type': 'application/json; charset=utf-8', 'Connection': 'close'},
-        data=json.dumps({'path': path}, ensure_ascii=False).encode('utf-8'),
+        data=json.dumps({'path': penc(path)}, ensure_ascii=False).encode('utf-8'),
         timeout=10
     )
     r.raise_for_status()
@@ -208,8 +218,7 @@ def api_upload(local_path, remote_dir, mtime_local):
 
     body = StreamingMultipart(part_head, local_path, part_tail, filesize, '  Upload ')
     r = requests.post(
-        f'{BASE}/api/upload',
-        params={'path': remote_dir},
+        f'{BASE}/api/upload?path={urlquote(remote_dir, safe="")}',
         headers={
             'Content-Type': f'multipart/form-data; boundary={boundary}',
             'X-File-Mtime': str(mtime_local),
@@ -509,7 +518,7 @@ def main():
                             f'{BASE}/api/delete',
                             headers={'Content-Type': 'application/json; charset=utf-8',
                                      'Connection': 'close'},
-                            data=json.dumps({'paths': [path]},
+                            data=json.dumps({'paths': [penc(path)]},
                                             ensure_ascii=False).encode('utf-8'),
                             timeout=10
                         )
@@ -532,7 +541,7 @@ def main():
                             f'{BASE}/api/delete',
                             headers={'Content-Type': 'application/json; charset=utf-8',
                                      'Connection': 'close'},
-                            data=json.dumps({'paths': [path]},
+                            data=json.dumps({'paths': [penc(path)]},
                                             ensure_ascii=False).encode('utf-8'),
                             timeout=10
                         )
